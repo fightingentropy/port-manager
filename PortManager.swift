@@ -1222,13 +1222,14 @@ struct DevServersView: View {
                                 Text(config.name)
                                     .font(.headline)
                                 if let server {
+                                    let noPortURL = "http://\(server.routeHost)"
                                     HStack(spacing: 8) {
-                                        Text(server.proxiedURL)
+                                        Text(noPortURL)
                                             .font(.system(.caption, design: .monospaced))
                                             .foregroundColor(.blue)
                                             .lineLimit(1)
                                         Button("Open") {
-                                            openURL(server.proxiedURL)
+                                            openURL(noPortURL)
                                         }
                                         .buttonStyle(.link)
                                     }
