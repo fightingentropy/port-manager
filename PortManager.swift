@@ -1760,7 +1760,15 @@ final class AppSettings: ObservableObject {
         } else {
             self.autoCheckUpdates = UserDefaults.standard.bool(forKey: autoCheckUpdatesKey)
         }
-        self.updatesFeedURL = UserDefaults.standard.string(forKey: updatesFeedURLKey) ?? defaultUpdatesFeedURL
+        let storedFeedURL = UserDefaults.standard.string(forKey: updatesFeedURLKey) ?? defaultUpdatesFeedURL
+        if storedFeedURL.contains("erlinhoxha/portmanager")
+            || storedFeedURL.contains("erlinhoxha/port-manager")
+            || storedFeedURL.contains("fightingentropy/portmanager") {
+            self.updatesFeedURL = defaultUpdatesFeedURL
+            UserDefaults.standard.set(defaultUpdatesFeedURL, forKey: updatesFeedURLKey)
+        } else {
+            self.updatesFeedURL = storedFeedURL
+        }
     }
 
     func applyAppMode() {
@@ -1803,7 +1811,11 @@ final class UpdateChecker: ObservableObject {
             request.setValue("PortManager", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                statusMessage = "Update check failed: unexpected server response."
+                if let http = response as? HTTPURLResponse {
+                    statusMessage = "Update check failed: server returned \(http.statusCode)."
+                } else {
+                    statusMessage = "Update check failed: unexpected server response."
+                }
                 return
             }
 
@@ -1827,7 +1839,7 @@ final class UpdateChecker: ObservableObject {
                 isUpdateAvailable = false
                 canInstallUpdate = false
                 if !silentNoUpdate {
-                    statusMessage = "You are up to date (\(currentVersion))."
+                    statusMessage = "No updates available. Current version: \(currentVersion)."
                 }
             }
         } catch {
