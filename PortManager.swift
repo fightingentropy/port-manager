@@ -1810,12 +1810,21 @@ final class UpdateChecker: ObservableObject {
             request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
             request.setValue("PortManager", forHTTPHeaderField: "User-Agent")
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                if let http = response as? HTTPURLResponse {
-                    statusMessage = "Update check failed: server returned \(http.statusCode)."
-                } else {
-                    statusMessage = "Update check failed: unexpected server response."
-                }
+            guard let http = response as? HTTPURLResponse else {
+                statusMessage = "Update check failed: unexpected server response."
+                return
+            }
+            if http.statusCode == 404 {
+                // GitHub returns 404 on /releases/latest when no release exists yet.
+                isUpdateAvailable = false
+                canInstallUpdate = false
+                latestVersion = nil
+                latestReleaseURL = nil
+                statusMessage = "No updates available."
+                return
+            }
+            guard (200...299).contains(http.statusCode) else {
+                statusMessage = "Update check failed: server returned \(http.statusCode)."
                 return
             }
 
