@@ -135,7 +135,7 @@ Settings includes:
 
 Default feed URL:
 
-`https://api.github.com/repos/erlinhoxha/port-manager/releases/latest`
+`https://api.github.com/repos/fightingentropy/port-manager/releases/latest`
 
 ## Menu Bar Mode
 

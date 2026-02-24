@@ -1731,7 +1731,7 @@ final class AppSettings: ObservableObject {
     private let launchAtLoginKey = "launchAtLogin"
     private let autoCheckUpdatesKey = "autoCheckUpdates"
     private let updatesFeedURLKey = "updatesFeedURL"
-    private let defaultUpdatesFeedURL = "https://api.github.com/repos/erlinhoxha/port-manager/releases/latest"
+    private let defaultUpdatesFeedURL = "https://api.github.com/repos/fightingentropy/port-manager/releases/latest"
 
     @Published private(set) var menuBarModeEnabled: Bool = true
 
