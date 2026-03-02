@@ -82,6 +82,26 @@ struct DevServerConfig: Identifiable, Codable, Hashable {
     }
 }
 
+private func normalizedRouteValue(_ value: String) -> String {
+    let allowed = value.lowercased().map { char -> Character in
+        if char.isLetter || char.isNumber || char == "-" || char == "." {
+            return char
+        }
+        return "-"
+    }
+    let collapsed = String(allowed).replacingOccurrences(of: "--+", with: "-", options: .regularExpression)
+    let trimmed = collapsed.trimmingCharacters(in: CharacterSet(charactersIn: "-."))
+    return trimmed.isEmpty ? "app" : trimmed
+}
+
+private func resolvedRouteName(name: String, routeName: String) -> String {
+    let rawRoute = routeName.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !rawRoute.isEmpty {
+        return normalizedRouteValue(rawRoute)
+    }
+    return normalizedRouteValue(name.trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
 enum ServerStatus: String {
     case stopped = "Stopped"
     case starting = "Starting"
@@ -309,10 +329,15 @@ final class LocalhostProxyManager: ObservableObject {
     private var httpsListener: NWListener?
     private let listenerQueue = DispatchQueue(label: "PortManager.Proxy.Listener")
     private let routesQueue = DispatchQueue(label: "PortManager.Proxy.Routes")
+    private let privilegedQueue = DispatchQueue(label: "PortManager.Proxy.Privileged")
     private var routeMap: [String: Int] = [:]
     private var activeTunnels: [UUID: ProxyTunnel] = [:]
     private let certificatePassphrase = "port-manager"
     private var expectedHosts: Set<String> = ["localhost"]
+    private var noPortRedirectEnabledByApp = false
+    private var pendingDisableRedirectWorkItem: DispatchWorkItem?
+    private let noPortRedirectAnchor = "portmanager"
+    private var manageNoPortRedirect = true
 
     init(listenPort: Int = 1355, secureListenPort: Int = 443) {
         self.listenPort = listenPort
@@ -366,7 +391,93 @@ final class LocalhostProxyManager: ObservableObject {
     }
 
     private func refreshRunningState() {
+        let wasRunning = isRunning
         isRunning = isHTTPRunning
+        guard wasRunning != isRunning else { return }
+        syncNoPortRedirectWithRunningState(isRunning)
+    }
+
+    private func syncNoPortRedirectWithRunningState(_ running: Bool) {
+        guard manageNoPortRedirect else { return }
+        pendingDisableRedirectWorkItem?.cancel()
+        pendingDisableRedirectWorkItem = nil
+
+        if running {
+            privilegedQueue.async { [weak self] in
+                self?.setNoPortRedirectEnabled(true)
+            }
+            return
+        }
+
+        // Avoid prompt churn when proxy briefly restarts for host updates.
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.privilegedQueue.async { [weak self] in
+                self?.setNoPortRedirectEnabled(false)
+            }
+        }
+        pendingDisableRedirectWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
+    }
+
+    func disableNoPortRedirectManagementForTermination() {
+        manageNoPortRedirect = false
+        pendingDisableRedirectWorkItem?.cancel()
+        pendingDisableRedirectWorkItem = nil
+    }
+
+    private func setNoPortRedirectEnabled(_ enabled: Bool, force: Bool = false) {
+        guard force || enabled != noPortRedirectEnabledByApp else { return }
+
+        do {
+            if enabled {
+                let ipv4Rule = "rdr pass on lo0 inet proto tcp from any to any port 80 -> 127.0.0.1 port \(listenPort)"
+                let ipv6Rule = "rdr pass on lo0 inet6 proto tcp from any to any port 80 -> ::1 port \(listenPort)"
+                let command = "pfctl -E >/dev/null 2>&1 || true; printf '%s\\n%s\\n' '\(ipv4Rule)' '\(ipv6Rule)' | pfctl -a \(noPortRedirectAnchor) -f -"
+                try runPrivilegedShellCommand(command)
+            } else {
+                let command = "pfctl -a \(noPortRedirectAnchor) -F all >/dev/null 2>&1 || true"
+                try runPrivilegedShellCommand(command)
+            }
+            noPortRedirectEnabledByApp = enabled
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if let current = self.errorMessage, current.hasPrefix("No-port redirect ") {
+                    self.errorMessage = nil
+                }
+            }
+        } catch {
+            DispatchQueue.main.async { [weak self] in
+                self?.errorMessage = "No-port redirect \(enabled ? "enable" : "disable") failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    @discardableResult
+    func disableNoPortRedirectImmediatelyForShutdown() -> Bool {
+        pendingDisableRedirectWorkItem?.cancel()
+        pendingDisableRedirectWorkItem = nil
+        var success = true
+        privilegedQueue.sync {
+            do {
+                let command = "pfctl -a \(noPortRedirectAnchor) -F all >/dev/null 2>&1 || true"
+                try runPrivilegedShellCommand(command)
+                noPortRedirectEnabledByApp = false
+            } catch {
+                success = false
+                DispatchQueue.main.async { [weak self] in
+                    self?.errorMessage = "No-port redirect disable failed: \(error.localizedDescription)"
+                }
+            }
+        }
+        return success
+    }
+
+    private func runPrivilegedShellCommand(_ command: String) throws {
+        let escaped = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "do shell script \"\(escaped)\" with administrator privileges"
+        try runCommand(executable: "/usr/bin/osascript", arguments: ["-e", script])
     }
 
     private func registerConnection(_ connection: NWConnection) {
@@ -607,17 +718,8 @@ final class DevServerManager: ObservableObject {
         }
     }
 
-    private func normalizedRouteName(for config: DevServerConfig) -> String {
-        let raw = config.routeName.isEmpty ? config.name : config.routeName
-        let allowed = raw.lowercased().map { char -> Character in
-            if char.isLetter || char.isNumber || char == "-" || char == "." {
-                return char
-            }
-            return "-"
-        }
-        let collapsed = String(allowed).replacingOccurrences(of: "--+", with: "-", options: .regularExpression)
-        let trimmed = collapsed.trimmingCharacters(in: CharacterSet(charactersIn: "-."))
-        return trimmed.isEmpty ? "app" : trimmed
+    func routeHost(for config: DevServerConfig) -> String {
+        "\(resolvedRouteName(name: config.name, routeName: config.routeName)).localhost"
     }
 
     private func reserveAvailablePort() -> Int? {
@@ -635,7 +737,7 @@ final class DevServerManager: ObservableObject {
     }
 
     private func refreshExpectedHosts() {
-        let configHosts = configs.map { "\(normalizedRouteName(for: $0)).localhost" }
+        let configHosts = configs.map(routeHost(for:))
         let runningHosts = runningServers.map(\.routeHost)
         proxy.setExpectedHosts(configHosts + runningHosts)
     }
@@ -656,7 +758,7 @@ final class DevServerManager: ObservableObject {
             return
         }
 
-        let routeHost = "\(normalizedRouteName(for: config)).localhost"
+        let routeHost = routeHost(for: config)
         if runningServers.contains(where: { $0.routeHost == routeHost }) {
             lastErrorMessage = "Route already in use: \(routeHost)"
             return
@@ -1041,6 +1143,9 @@ struct DevServerEditorView: View {
 
     let onSave: (DevServerConfig) -> Void
     let existingID: UUID?
+    private var resolvedRoutePreview: String {
+        resolvedRouteName(name: name, routeName: routeName)
+    }
 
     init(config: DevServerConfig?, onSave: @escaping (DevServerConfig) -> Void) {
         self.onSave = onSave
@@ -1058,19 +1163,15 @@ struct DevServerEditorView: View {
                 .font(.headline)
 
             TextField("Name", text: $name)
-            TextField("Route name (e.g. myapp)", text: $routeName)
+            TextField("Route name (optional, e.g. myapp)", text: $routeName)
+            Text("URL will be http://\(resolvedRoutePreview).localhost")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
             HStack {
                 TextField("Working directory", text: $workingDirectory)
                 Button("Choose...") {
-                    let panel = NSOpenPanel()
-                    panel.canChooseDirectories = true
-                    panel.canChooseFiles = false
-                    panel.allowsMultipleSelection = false
-                    panel.prompt = "Choose"
-                    if panel.runModal() == .OK, let url = panel.url {
-                        workingDirectory = url.path
-                    }
+                    chooseWorkingDirectory()
                 }
             }
 
@@ -1085,10 +1186,12 @@ struct DevServerEditorView: View {
                     dismiss()
                 }
                 Button("Save") {
+                    let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedRouteName = routeName.trimmingCharacters(in: .whitespacesAndNewlines)
                     let config = DevServerConfig(
                         id: existingID ?? UUID(),
-                        name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                        routeName: routeName.trimmingCharacters(in: .whitespacesAndNewlines),
+                        name: trimmedName,
+                        routeName: trimmedRouteName,
                         workingDirectory: workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines),
                         command: command.trimmingCharacters(in: .whitespacesAndNewlines),
                         autoStart: autoStart
@@ -1101,6 +1204,22 @@ struct DevServerEditorView: View {
         }
         .padding(20)
         .frame(width: 520)
+    }
+
+    private func chooseWorkingDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        NSApp.activate(ignoringOtherApps: true)
+        if !workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: workingDirectory)
+        }
+        let response = panel.runModal()
+        if response == .OK, let url = panel.url {
+            workingDirectory = url.path
+        }
     }
 }
 
@@ -1222,21 +1341,19 @@ struct DevServersView: View {
                                 Text(config.name)
                                     .font(.headline)
                                 if let server {
-                                    let noPortURL = "http://\(server.routeHost)"
+                                    let browserURL = "http://\(server.routeHost)"
                                     HStack(spacing: 8) {
-                                        Text(noPortURL)
+                                        Text(browserURL)
                                             .font(.system(.caption, design: .monospaced))
                                             .foregroundColor(.blue)
                                             .lineLimit(1)
                                         Button("Open") {
-                                            openURL(noPortURL)
+                                            openURL(browserURL)
                                         }
                                         .buttonStyle(.link)
                                     }
-                                } else if !config.routeName.isEmpty {
-                                    Text(manager.proxy.listenPort == 80
-                                         ? "http://\(config.routeName).localhost"
-                                         : "http://\(config.routeName).localhost:\(String(manager.proxy.listenPort))")
+                                } else {
+                                    Text("http://\(manager.routeHost(for: config))")
                                         .font(.system(.caption, design: .monospaced))
                                         .foregroundColor(.secondary)
                                         .lineLimit(1)
@@ -1679,8 +1796,6 @@ struct ContentView: View {
             Button("Kill", role: .destructive) {
                 if let port = portToKill {
                     let result = terminateProcess(pid: port.pid)
-                    alertMessage = result.message
-                    showingAlert = true
                     if result.success {
                         // Refresh the list after killing
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1689,6 +1804,9 @@ struct ContentView: View {
                     } else if result.needsForce {
                         portToForceKill = port
                         showingForceKillConfirmation = true
+                    } else {
+                        alertMessage = result.message
+                        showingAlert = true
                     }
                 }
             }
@@ -1702,12 +1820,13 @@ struct ContentView: View {
             Button("Force Kill", role: .destructive) {
                 if let port = portToForceKill {
                     let result = forceKillProcess(pid: port.pid)
-                    alertMessage = result.message
-                    showingAlert = true
                     if result.success {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                             scanner.scan()
                         }
+                    } else {
+                        alertMessage = result.message
+                        showingAlert = true
                     }
                 }
             }
@@ -2153,6 +2272,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        DevServerManager.shared.proxy.disableNoPortRedirectManagementForTermination()
+        DevServerManager.shared.proxy.stop()
+        return .terminateNow
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
@@ -2179,12 +2304,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         statusItem = item
 
         let pop = NSPopover()
-        pop.behavior = .transient
+        pop.behavior = .applicationDefined
         pop.contentSize = NSSize(width: 720, height: 500)
         pop.contentViewController = NSHostingController(rootView: MainContentView())
         popover = pop
 
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            // Ignore outside-click auto-close while a modal panel (e.g. NSOpenPanel) is active.
+            if NSApp.modalWindow != nil {
+                return
+            }
             self?.closePopover()
         }
     }
