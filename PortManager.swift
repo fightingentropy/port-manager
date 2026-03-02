@@ -716,7 +716,6 @@ final class DevServerManager: ObservableObject {
 
         loadConfigs()
         refreshExpectedHosts()
-        proxy.start()
         for config in configs where config.autoStart {
             start(config: config)
         }
@@ -1303,13 +1302,11 @@ struct DevServersView: View {
                 if manager.proxy.isRunning {
                     Button("Stop Proxy") {
                         manager.proxy.stop()
-                        closeMenuBarPopover()
                     }
                     .buttonStyle(.bordered)
                 } else {
                     Button("Start Proxy") {
                         manager.proxy.start()
-                        closeMenuBarPopover()
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -1386,7 +1383,6 @@ struct DevServersView: View {
                             if server != nil {
                                 Button("Stop") {
                                     manager.stop(config: config)
-                                    closeMenuBarPopover()
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .tint(.red)
@@ -1396,8 +1392,6 @@ struct DevServersView: View {
                                     if let error = manager.lastErrorMessage {
                                         alertMessage = error
                                         showingAlert = true
-                                    } else {
-                                        closeMenuBarPopover()
                                     }
                                 }
                                 .buttonStyle(.bordered)
