@@ -5,6 +5,10 @@ import Network
 import Darwin
 import Combine
 
+extension Notification.Name {
+    static let requestCloseMenuBarPopover = Notification.Name("requestCloseMenuBarPopover")
+}
+
 // MARK: - Model
 
 struct PortInfo: Identifiable, Hashable {
@@ -1266,6 +1270,10 @@ struct DevServersView: View {
         NSWorkspace.shared.open(url)
     }
 
+    private func closeMenuBarPopover() {
+        NotificationCenter.default.post(name: .requestCloseMenuBarPopover, object: nil)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -1295,11 +1303,13 @@ struct DevServersView: View {
                 if manager.proxy.isRunning {
                     Button("Stop Proxy") {
                         manager.proxy.stop()
+                        closeMenuBarPopover()
                     }
                     .buttonStyle(.bordered)
                 } else {
                     Button("Start Proxy") {
                         manager.proxy.start()
+                        closeMenuBarPopover()
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -1349,6 +1359,7 @@ struct DevServersView: View {
                                             .lineLimit(1)
                                         Button("Open") {
                                             openURL(browserURL)
+                                            closeMenuBarPopover()
                                         }
                                         .buttonStyle(.link)
                                     }
@@ -1375,6 +1386,7 @@ struct DevServersView: View {
                             if server != nil {
                                 Button("Stop") {
                                     manager.stop(config: config)
+                                    closeMenuBarPopover()
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .tint(.red)
@@ -1384,6 +1396,8 @@ struct DevServersView: View {
                                     if let error = manager.lastErrorMessage {
                                         alertMessage = error
                                         showingAlert = true
+                                    } else {
+                                        closeMenuBarPopover()
                                     }
                                 }
                                 .buttonStyle(.bordered)
@@ -2256,6 +2270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var eventMonitor: Any?
+    private var closePopoverObserver: NSObjectProtocol?
     private var settingsWindow: NSWindow?
     @Published var isPopoverShown = false
 
@@ -2281,6 +2296,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationWillTerminate(_ notification: Notification) {
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
+        }
+        if let closePopoverObserver {
+            NotificationCenter.default.removeObserver(closePopoverObserver)
         }
     }
 
@@ -2314,6 +2332,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             if NSApp.modalWindow != nil {
                 return
             }
+            self?.closePopover()
+        }
+
+        closePopoverObserver = NotificationCenter.default.addObserver(
+            forName: .requestCloseMenuBarPopover,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             self?.closePopover()
         }
     }
