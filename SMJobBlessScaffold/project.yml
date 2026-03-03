@@ -1,0 +1,51 @@
+name: PortManagerSMJobBless
+options:
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: 5.10
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: TEAMID
+targets:
+  PortManager:
+    type: application
+    platform: macOS
+    deploymentTarget: "14.0"
+    info:
+      path: ../Info.plist
+      properties:
+        CFBundleIdentifier: com.erlinhoxha.portmanager
+    sources:
+      - path: ../PortManager.swift
+      - path: App
+      - path: Shared
+    dependencies: []
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.erlinhoxha.portmanager
+        INFOPLIST_KEY_LSMinimumSystemVersion: "14.0"
+    entitlements:
+      path: Templates/placeholder-app.entitlements
+    postBuildScripts:
+      - name: "Reminder"
+        script: |
+          echo "Set SMPrivilegedExecutables in host Info.plist from Templates/host-SMPrivilegedExecutables.plist"
+
+  PortManagerPrivilegedHelper:
+    type: tool
+    platform: macOS
+    deploymentTarget: "14.0"
+    info:
+      path: Templates/helper-Info.plist
+    sources:
+      - path: Helper
+      - path: Shared
+    settings:
+      base:
+        PRODUCT_NAME: com.erlinhoxha.portmanager.helper
+        PRODUCT_BUNDLE_IDENTIFIER: com.erlinhoxha.portmanager.helper
+        SKIP_INSTALL: NO
+        CODE_SIGNING_ALLOWED: YES
+        INFOPLIST_FILE: Templates/helper-Info.plist
+    entitlements:
+      path: Templates/placeholder-helper.entitlements

@@ -1,0 +1,9 @@
+<!--
+Merge this dictionary into the host app Info.plist.
+Replace requirement string with one generated for the signed helper.
+-->
+<key>SMPrivilegedExecutables</key>
+<dict>
+    <key>com.erlinhoxha.portmanager.helper</key>
+    <string>identifier "com.erlinhoxha.portmanager.helper" and anchor apple generic and certificate leaf[subject.OU] = "TEAMID"</string>
+</dict>

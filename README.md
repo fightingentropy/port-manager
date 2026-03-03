@@ -141,6 +141,36 @@ Default feed URL:
 
 The app uses a shared dev-server manager instance to avoid duplicate proxy startup attempts between main window and menu bar popover.
 
+## SMJobBless (Planned / Do Later)
+
+This repo now includes an `SMJobBless` scaffold so we can move privileged `pfctl`
+operations into a proper signed helper tool (instead of per-command AppleScript
+admin prompts).
+
+Scaffold location:
+
+- `/Users/erlinhoxha/Developer/port-manager/SMJobBlessScaffold`
+- Start here: `/Users/erlinhoxha/Developer/port-manager/SMJobBlessScaffold/README.md`
+
+Current status:
+
+- Scaffolded only (not wired into runtime yet).
+- Main app still uses current privileged command path.
+
+Prerequisites before finishing:
+
+1. Install full Xcode (not only Command Line Tools).
+2. Have a valid code-signing identity in Keychain.
+3. Build host + helper with matching Team/signing requirements.
+
+Later completion checklist:
+
+1. Generate/open Xcode project from scaffold (`project.yml`) or integrate into your existing Xcode project.
+2. Configure helper label/bundle IDs and plist requirement strings.
+3. Sign both targets and verify `SMJobBless` install succeeds.
+4. Switch `PortManager.swift` privileged execution to call `PrivilegedHelperClient`.
+5. Test start/stop proxy flows and no-port redirect behavior end-to-end.
+
 ## Troubleshooting
 
 ### `Address already in use`
