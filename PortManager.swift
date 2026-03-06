@@ -113,6 +113,15 @@ enum ServerStatus: String {
     case failed = "Failed"
 }
 
+enum BrewManagedServiceStatus: String {
+    case unavailable = "Unavailable"
+    case stopped = "Stopped"
+    case starting = "Starting"
+    case running = "Running"
+    case stopping = "Stopping"
+    case unknown = "Unknown"
+}
+
 final class RunningServer: ObservableObject, Identifiable {
     let id: UUID
     let configID: UUID
@@ -926,6 +935,231 @@ private func isTCPPortAvailable(_ port: Int) -> Bool {
     }
 }
 
+// MARK: - Homebrew Services
+
+@MainActor
+final class BrewServiceManager: ObservableObject {
+    static let shared = BrewServiceManager()
+
+    @Published private(set) var postgresFormula: String?
+    @Published private(set) var postgresStatus: BrewManagedServiceStatus = .unknown
+    @Published private(set) var isBusy = false
+    @Published private(set) var lastErrorMessage: String?
+
+    private init() {
+        Task {
+            await refreshPostgresStatus()
+        }
+    }
+
+    func refreshPostgresStatus() async {
+        lastErrorMessage = nil
+
+        do {
+            let formula = try await Self.discoverPostgresFormula()
+            postgresFormula = formula
+
+            guard let formula else {
+                postgresStatus = .unavailable
+                return
+            }
+
+            let services = try await Self.loadServiceStatuses()
+            postgresStatus = services[formula] ?? .stopped
+        } catch {
+            postgresStatus = .unknown
+            lastErrorMessage = "Failed to load Homebrew services: \(error.localizedDescription)"
+        }
+    }
+
+    func startPostgres() {
+        guard !isBusy else { return }
+        guard let formula = postgresFormula else {
+            postgresStatus = .unavailable
+            lastErrorMessage = "No Homebrew PostgreSQL formula found."
+            return
+        }
+
+        isBusy = true
+        postgresStatus = .starting
+        lastErrorMessage = nil
+
+        Task {
+            defer { isBusy = false }
+
+            do {
+                _ = try await Self.runBrew(arguments: ["services", "start", formula])
+                await refreshPostgresStatus()
+            } catch {
+                postgresStatus = .unknown
+                lastErrorMessage = "Failed to start \(formula): \(error.localizedDescription)"
+                await refreshPostgresStatus()
+            }
+        }
+    }
+
+    func stopPostgres() {
+        guard !isBusy else { return }
+        guard let formula = postgresFormula else {
+            postgresStatus = .unavailable
+            lastErrorMessage = "No Homebrew PostgreSQL formula found."
+            return
+        }
+
+        isBusy = true
+        postgresStatus = .stopping
+        lastErrorMessage = nil
+
+        Task {
+            defer { isBusy = false }
+
+            do {
+                _ = try await Self.runBrew(arguments: ["services", "stop", formula])
+                await refreshPostgresStatus()
+            } catch {
+                postgresStatus = .unknown
+                lastErrorMessage = "Failed to stop \(formula): \(error.localizedDescription)"
+                await refreshPostgresStatus()
+            }
+        }
+    }
+
+    private nonisolated static func discoverPostgresFormula() async throws -> String? {
+        let services = try await runBrew(arguments: ["services", "list"])
+        let serviceEntries = services
+            .split(whereSeparator: \.isNewline)
+            .dropFirst()
+            .compactMap(parseServiceEntry(from:))
+            .filter { isPostgresFormula($0.name) }
+
+        if let running = serviceEntries.first(where: { $0.status == .running }) {
+            return running.name
+        }
+        if let firstService = serviceEntries.sorted(by: { comparePostgresFormulaNames($0.name, $1.name) }).first {
+            return firstService.name
+        }
+
+        let formulasOutput = try await runBrew(arguments: ["list", "--formula"])
+        let formulas = formulasOutput
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter(isPostgresFormula(_:))
+            .sorted(by: comparePostgresFormulaNames)
+
+        return formulas.first
+    }
+
+    private nonisolated static func loadServiceStatuses() async throws -> [String: BrewManagedServiceStatus] {
+        let output = try await runBrew(arguments: ["services", "list"])
+        let entries = output
+            .split(whereSeparator: \.isNewline)
+            .dropFirst()
+            .compactMap(parseServiceEntry(from:))
+
+        return Dictionary(uniqueKeysWithValues: entries.map { ($0.name, $0.status) })
+    }
+
+    private nonisolated static func parseServiceEntry(from line: Substring) -> (name: String, status: BrewManagedServiceStatus)? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let fields = trimmed.split(whereSeparator: \.isWhitespace)
+        guard fields.count >= 2 else { return nil }
+
+        let name = String(fields[0])
+        let rawStatus = String(fields[1]).lowercased()
+        return (name, status: mapServiceStatus(rawStatus))
+    }
+
+    private nonisolated static func mapServiceStatus(_ rawStatus: String) -> BrewManagedServiceStatus {
+        switch rawStatus {
+        case "started", "running":
+            return .running
+        case "none", "stopped":
+            return .stopped
+        case "scheduled":
+            return .starting
+        case "unknown":
+            return .unknown
+        default:
+            return .unknown
+        }
+    }
+
+    private nonisolated static func isPostgresFormula(_ name: String) -> Bool {
+        let range = name.range(of: #"^postgresql(@\d+)?$"#, options: .regularExpression)
+        return range != nil
+    }
+
+    private nonisolated static func comparePostgresFormulaNames(_ lhs: String, _ rhs: String) -> Bool {
+        postgresFormulaSortKey(lhs) > postgresFormulaSortKey(rhs)
+    }
+
+    private nonisolated static func postgresFormulaSortKey(_ name: String) -> Int {
+        guard let suffix = name.split(separator: "@").last, name.contains("@"), let version = Int(suffix) else {
+            return Int.max
+        }
+        return version
+    }
+
+    private nonisolated static func runBrew(arguments: [String]) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let output = try runBrewSync(arguments: arguments)
+                    continuation.resume(returning: output)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private nonisolated static func runBrewSync(arguments: [String]) throws -> String {
+        guard let brewPath = brewExecutablePath() else {
+            throw NSError(
+                domain: "PortManagerBrewService",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Homebrew executable not found in /opt/homebrew/bin or /usr/local/bin."]
+            )
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: brewPath)
+        process.arguments = arguments
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if process.terminationStatus != 0 {
+            throw NSError(
+                domain: "PortManagerBrewService",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: stderr.isEmpty ? "brew exited with status \(process.terminationStatus)." : stderr]
+            )
+        }
+
+        return output
+    }
+
+    private nonisolated static func brewExecutablePath() -> String? {
+        let candidates = [
+            "/opt/homebrew/bin/brew",
+            "/usr/local/bin/brew"
+        ]
+        return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+}
+
 // MARK: - Port Scanner
 
 class PortScanner: ObservableObject {
@@ -1464,6 +1698,106 @@ struct DevServersView: View {
                 Text("Are you sure you want to delete \"\(config.name)\"? This action cannot be undone.")
             }
         }
+    }
+}
+
+struct DatabasesView: View {
+    @StateObject private var brewServices = BrewServiceManager.shared
+
+    private var postgresStatusColor: Color {
+        switch brewServices.postgresStatus {
+        case .running:
+            return .green
+        case .starting, .stopping:
+            return .orange
+        case .stopped, .unknown, .unavailable:
+            return .red
+        }
+    }
+
+    private var postgresStatusSummary: String {
+        switch brewServices.postgresStatus {
+        case .running:
+            return "Running"
+        case .starting:
+            return "Starting"
+        case .stopping:
+            return "Stopping"
+        case .stopped:
+            return "Stopped"
+        case .unavailable:
+            return "Not installed"
+        case .unknown:
+            return "Unknown"
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Databases")
+                    .font(.headline)
+                Spacer()
+                Button("Refresh") {
+                    Task {
+                        await brewServices.refreshPostgresStatus()
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(brewServices.isBusy)
+            }
+            .padding()
+            .background(Color(NSColor.windowBackgroundColor))
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .center, spacing: 12) {
+                    Circle()
+                        .fill(postgresStatusColor)
+                        .frame(width: 10, height: 10)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Postgres")
+                            .font(.headline)
+                        Text(postgresStatusSummary)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(brewServices.postgresFormula ?? "Homebrew PostgreSQL formula not found")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    if brewServices.postgresStatus == .running {
+                        Button("Stop") {
+                            brewServices.stopPostgres()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .disabled(brewServices.isBusy)
+                    } else {
+                        Button("Start") {
+                            brewServices.startPostgres()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(brewServices.isBusy || brewServices.postgresStatus == .unavailable)
+                    }
+                }
+
+                if let postgresError = brewServices.lastErrorMessage {
+                    Text(postgresError)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                } else {
+                    Text("Controls Homebrew-managed PostgreSQL services like `postgresql@18`.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(20)
+
+            Spacer()
+        }
+        .frame(minWidth: 520, minHeight: 320)
     }
 }
 
@@ -2242,6 +2576,8 @@ struct MainContentView: View {
                 .tabItem { Label("Ports", systemImage: "network") }
             DevServersView()
                 .tabItem { Label("Dev Servers", systemImage: "terminal") }
+            DatabasesView()
+                .tabItem { Label("Databases", systemImage: "internaldrive") }
         }
         .frame(minWidth: 720, minHeight: 480)
         .toolbar {

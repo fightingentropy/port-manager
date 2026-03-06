@@ -4,6 +4,7 @@ Native macOS SwiftUI app for:
 
 - Scanning and managing local listening ports
 - Starting/stopping dev servers
+- Starting/stopping Homebrew-managed Postgres
 - Routing named `.localhost` hosts to your running dev servers (portless-style)
 - HTTP local proxying
 
@@ -13,6 +14,7 @@ Native macOS SwiftUI app for:
 - Per-server dynamic backend port assignment (`4000-4999`)
 - Built-in HTTP reverse proxy on `:1355` (no sudo needed)
 - Dev server manager with start/stop and quick-open links
+- Postgres controls for Homebrew services (`postgresql`, `postgresql@17`, `postgresql@18`, etc.)
 - Port scanner + process termination tools
 - Menu bar mode support
 - Update checker (manual + auto-check on launch)
